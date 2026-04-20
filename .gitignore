@@ -1,0 +1,55 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# R
+.Rhistory
+.Rapp.history
+.RData
+.Ruserdata
+.Rproj.user/
+*.Rproj
+
+# Quarto / knitr cache
+*_cache/
+*_files/
+.quarto/
+_site/
+
+# Large data files — track with Git LFS or exclude
+*.vcf
+*.vcf.gz
+*.bam
+*.bam.bai
+*.fastq
+*.fastq.gz
+*.fq.gz
+*.tsv.gz
+*.csv.gz
+
+# Stacks output intermediates
+*.alleles.tsv
+*.snps.tsv
+*.tags.tsv
+*.matches.tsv
+*.log.distribs
+
+# Generic outputs you don't want versioned
+output/*.pdf
+output/*.png
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~

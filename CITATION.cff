@@ -1,0 +1,62 @@
+cff-version: 1.2.0
+message: "If you use this code or data, please cite the paper and this repository."
+type: software
+title: "Bay Pipefish Population Genomics"
+abstract: >
+  Analysis code supporting: Currey et al. Genome-wide Analysis Reveals High
+  Genomic Diversity and Panmixia in Bay Pipefish (Syngnathus leptorhynchus)
+  from Coos Bay, Oregon. Ichthyology and Herpetology.
+authors:
+  - family-names: Currey
+    given-names: Mark C.
+    affiliation: "Institute of Ecology and Evolution, University of Oregon"
+    email: mcurrey@uoregon.edu
+  - family-names: Woods
+    given-names: Micah A.
+    affiliation: "Institute of Ecology and Evolution, University of Oregon"
+  - family-names: Goyal
+    given-names: Vithika
+    affiliation: "Institute of Ecology and Evolution, University of Oregon"
+  - family-names: Bassham
+    given-names: Susan
+    affiliation: "Institute of Ecology and Evolution, University of Oregon"
+  - family-names: Healey
+    given-names: Hope M.
+    affiliation: "Institute of Ecology and Evolution, University of Oregon"
+  - family-names: Cresko
+    given-names: William A.
+    affiliation: "Institute of Ecology and Evolution, University of Oregon"
+    email: cresko@uoregon.edu
+repository-code: "https://github.com/fishes2catch/bay_pipefish_popgen_paper"
+license: MIT
+version: "1.0.0"
+date-released: "2026-01-01"
+doi: "10.5281/zenodo.XXXXXXX"
+keywords:
+  - population genomics
+  - RAD-seq
+  - pipefish
+  - Syngnathus leptorhynchus
+  - Syngnathidae
+  - panmixia
+  - linkage disequilibrium
+  - effective population size
+preferred-citation:
+  type: article
+  title: "Genome-wide Analysis Reveals High Genomic Diversity and Panmixia in Bay Pipefish (Syngnathus leptorhynchus) from Coos Bay, Oregon"
+  authors:
+    - family-names: Currey
+      given-names: Mark C.
+    - family-names: Woods
+      given-names: Micah A.
+    - family-names: Goyal
+      given-names: Vithika
+    - family-names: Bassham
+      given-names: Susan
+    - family-names: Healey
+      given-names: Hope M.
+    - family-names: Cresko
+      given-names: William A.
+  journal: "Ichthyology and Herpetology"
+  year: 2026
+  doi: "XXXXXXX"

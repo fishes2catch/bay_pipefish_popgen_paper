@@ -1,0 +1,1438 @@
+---
+title: "Population Genomics of Bay Pipefish (Syngnathus leptorhynchus) from Coos Bay, Oregon"
+subtitle: "Reproducible Analysis Pipeline"
+author:
+  - name: Mark C. Currey
+  - name: Micah A. Woods
+  - name: Vithika Goyal
+  - name: Susan Bassham
+  - name: Hope M. Healey
+  - name: William A. Cresko
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    theme: flatly
+    code-fold: true
+    fig-width: 10
+    fig-height: 8
+    fig-dpi: 300
+    embed-resources: true
+  pdf:
+    toc: true
+    fig-width: 10
+    fig-height: 8
+    fig-dpi: 300
+execute:
+  warning: false
+  message: false
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+# Overview
+
+This document contains the complete reproducible analysis pipeline for:
+
+**Currey MC, Woods MA, Goyal V, Bassham S, Healey HM, and Cresko WA.
+Genome-wide Analysis Reveals High Genomic Diversity and Panmixia in Bay
+Pipefish (*Syngnathus leptorhynchus*) from Coos Bay, Oregon.
+*Ichthyology and Herpetology*.**
+
+The document is organized into two major parts:
+
+-   **Section 0 — Data Generation:** Code blocks showing how all input
+    files were generated from raw sequencing data. These blocks are
+    marked `eval: false` and will not execute during rendering. They are
+    provided for transparency and reproducibility. Run these steps
+    manually before rendering the analysis sections.
+
+-   **Sections 1–11 — Analysis:** The full analysis pipeline that reads
+    the generated input files and produces all figures and tables in the
+    manuscript. These blocks execute when the document is rendered.
+
+All input files should be placed in the `input/` directory. All output
+figures and tables will be written to the `output/` directory.
+
+------------------------------------------------------------------------
+
+## Required Software
+
+The following R packages are required:
+
+``` r
+install.packages(c("data.table", "ggplot2", "dplyr", "tidyverse",
+                   "pheatmap", "ppcor", "scales", "gridExtra",
+                   "grid", "patchwork", "qqman", "knitr", "DT"))
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("SNPRelate")
+```
+
+The following external software must be installed separately:
+
+| Software | Version | URL |
+|----|----|----|
+| PLINK | v1.9 | https://www.cog-genomics.org/plink/ |
+| PLINK2 | v2.0 | https://www.cog-genomics.org/plink/2.0/ |
+| Stacks | v2.68 | https://catchenlab.life.illinois.edu/stacks/ |
+| GSNAP | 2024-05-07 | http://research-pub.gene.com/gmap/ |
+| Beagle | v5.4 | http://faculty.washington.edu/browning/beagle/beagle.html |
+| STRUCTURE | v2.3.4 | https://web.stanford.edu/group/pritchardlab/structure.html |
+| CLUMPAK | — | http://clumpak.tau.ac.il/ |
+| NeEstimator | v2 | https://www.montana.edu/kalinowski/Software/NeEstimator.htm |
+| Genodive | v3.04 | https://www.bentleydrummer.nl/software/software/GenoDive.html |
+
+------------------------------------------------------------------------
+
+## Setup
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(pheatmap)
+library(SNPRelate)
+library(ppcor)
+library(scales)
+library(gridExtra)
+library(grid)
+library(patchwork)
+library(Hmisc)
+library(knitr)
+library(DT)
+library(conflicted)
+
+if (!dir.exists("output")) dir.create("output", recursive = TRUE)
+if (!dir.exists("input"))  dir.create("input",  recursive = TRUE)
+
+runPLINK  <- function(PLINKoptions = "") system(paste("./plink",  PLINKoptions))
+runPLINK2 <- function(PLINKoptions = "") system(paste("./plink2", PLINKoptions))
+
+# Resolve package conflicts explicitly
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::first)
+conflicts_prefer(dplyr::last)
+conflicts_prefer(dplyr::summarise)
+
+cat("Setup complete.\n")
+cat("Input files should be placed in: input/\n")
+cat("Output files will be written to: output/\n")
+```
+
+------------------------------------------------------------------------
+
+# Section 0: Data Generation
+
+> **These code blocks are not executed during rendering
+> (`eval: false`).** They document how all input files were generated
+> from raw sequencing data. Run these steps manually in the order shown
+> before rendering Sections 1-11. See the Methods section of Currey et
+> al. for full parameter details.
+
+## 0.1 RAD-seq Processing with Stacks
+
+Raw Illumina reads were demultiplexed and quality filtered using
+`process_radtags` from Stacks v2.68, aligned to the *Syngnathus
+leptorhynchus* reference genome (GenBank: GCA_054491065.1) using GSNAP,
+and genotyped using `ref_map.pl` and `populations`.
+
+```{bash stacks-processing}
+#| eval: false
+
+# Step 1: Quality filter and demultiplex raw reads
+process_radtags \
+  -p /path/to/raw_reads/ \
+  -o /path/to/demultiplexed/ \
+  -b barcodes.txt \
+  --renz-1 sbfI \
+  -r -c -q
+
+# Step 2: Align to reference genome with GSNAP (example for one sample)
+gsnap \
+  -d Slep_genome \
+  -D /path/to/genome_index/ \
+  --nofails \
+  -m 5 \
+  -i 2 \
+  -n 1 \
+  -Q \
+  --format=sam \
+  sample.fq.gz | samtools view -bS | samtools sort \
+  -o alignments/sample.bam
+
+# Step 3: Run Stacks ref_map.pl
+ref_map.pl \
+  --samples alignments/ \
+  --popmap pop_map.txt \
+  -o stacks_output/ \
+  -T 8
+
+# Step 4: Stacks populations — two-population analysis
+# (FST, PCA, STRUCTURE, kinship)
+populations \
+  -P stacks_output/ \
+  -M pop_map.txt \
+  -O populations_output/ \
+  -r 0.8 \
+  -R 0.8 \
+  --min-maf 0.05 \
+  --write-single-snp \
+  --vcf \
+  --plink \
+  --structure \
+  --fstats \
+  -W whitelist_chr1-22.txt
+
+# Step 5: Stacks populations — single combined population
+# (LD and Ne analyses)
+populations \
+  -P stacks_output/ \
+  -M pop_map_combined.txt \
+  -O populations_combined_output/ \
+  -R 0.8 \
+  --min-maf 0.05 \
+  --write-single-snp \
+  --vcf \
+  --plink \
+  -W whitelist_chr1-22.txt
+
+# Output files used downstream:
+# populations_output/populations.snps.vcf
+# populations_output/populations.plink.ped / .map
+# populations_output/populations.structure
+```
+
+## 0.2 Population Map and Sample List Files
+
+The following files must be created manually before running Stacks and
+PLINK analyses. Place all files in the `input/` directory.
+
+```{bash pop-map-files}
+#| eval: false
+
+# pop_map.txt — tab-delimited: sample_name and population
+# Example:
+# Slep_3900.0001   Causeway
+# Slep_3899.0001   Valino_Island
+
+# Slep_pop.txt — all sample names to retain (one per line)
+# pop1.txt     — Causeway sample names only
+# pop2.txt     — Valino Island sample names only
+```
+
+## 0.3 LD Pruning and PLINK Binary File Generation
+
+> **Important:** LD pruning uses the VCF from the **combined
+> single-population Stacks run** (6,310 SNPs, no `-r` flag), not the
+> two-population run. This ensures that the Ne and NeEstimator analyses
+> are based on genome-wide allele frequencies without population
+> subdivision assumptions. Name this file
+> `populations_combined.snps.vcf` and place it in `input/`.
+
+```{bash ld-pruning}
+#| eval: false
+
+# Input: populations_combined.snps.vcf
+# (from Stacks populations combined single-population run — see Section 0.1 Step 5)
+
+# Step 1: LD pruning — sliding window 50 SNPs, step 10, r² threshold 0.2
+plink2 \
+  --vcf input/populations_combined.snps.vcf \
+  --indep-pairwise 50 10 0.2 \
+  --out input/ld_pruned
+
+# Step 2: Create pruned PLINK binary files
+plink2 \
+  --vcf input/populations_combined.snps.vcf \
+  --extract input/ld_pruned.prune.in \
+  --make-bed \
+  --out input/populations_pruned
+
+# Output: input/populations_pruned.bed / .bim / .fam
+# These files are used in Sections 10 and 11 (Ne estimation and NeEstimator)
+```
+
+## 0.4 Beagle Phasing and Genome-wide LD Calculation
+
+> **Important:** Beagle phasing and genome-wide LD calculation also use
+> the **combined single-population VCF**
+> (`populations_combined.snps.vcf`), consistent with the
+> single-population assumption required for LD analysis.
+
+```{bash beagle-plink-ld}
+#| eval: false
+
+# Input: populations_combined.snps.vcf
+# (from Stacks populations combined single-population run — see Section 0.1 Step 5)
+
+# Step 1: Phase reads with Beagle v5.4
+java -jar beagle.06Aug24.a91.jar \
+  gt=input/populations_combined.snps.vcf \
+  out=input/Slep.phased
+
+# Step 2: Sort chromosomes sequentially
+# Remove "HiC_scaffold_" prefix from chromosome names if needed, then:
+grep -v "^#" input/Slep.phased.vcf | \
+  sort -k1,1V -k2,2g >> input/Slep.phased.sorted.vcf
+
+# Step 3: Convert to PLINK2 binary format
+plink2 \
+  --vcf input/Slep.phased.sorted.vcf \
+  --out input/binary_fileset
+
+# Step 4: Calculate genome-wide LD
+plink2 \
+  --pfile input/binary_fileset \
+  --r2-phased cols=+dprimeabs \
+  --inter-chr \
+  --ld-window-r2 0 \
+  --out input/Slep_full_LD
+
+# Output: input/Slep_full_LD.vcor
+# This file is used in Sections 7, 8, and 9 (LD heatmap, LD decay, Chr 1 analysis)
+```
+
+## 0.5 FST Permutation Test
+
+100 permutation replicates were generated on the Talapas HPC cluster. In
+each replicate, individuals were randomly reassigned to the two sampling
+locations while preserving sample sizes, and genome-wide FST was
+recalculated using Stacks `populations`.
+
+```{bash fst-permutation}
+#| eval: false
+
+for i in $(seq 1 100); do
+
+  # Shuffle individual-to-population assignments
+  shuf input/Slep_pop.txt > input/pop_map_perm_${i}.txt
+
+  # Run Stacks populations with shuffled map
+  populations \
+    -P stacks_output/ \
+    -M input/pop_map_perm_${i}.txt \
+    -O permutation_output/perm_${i}/ \
+    -r 0.8 -R 0.8 \
+    --min-maf 0.05 \
+    --write-single-snp \
+    --fstats \
+    -W whitelist_chr1-22.txt
+
+  # Extract genome-wide FST and append to results file
+  grep "^All" permutation_output/perm_${i}/populations.fst_summary.tsv | \
+    awk '{print $NF}' >> input/permuted_fst_values.txt
+
+done
+
+# Output: input/permuted_fst_values.txt (100 FST values, one per line)
+```
+
+## 0.6 FST Bootstrap Resampling
+
+1,000 bootstrap replicates were generated on the Talapas HPC cluster. In
+each replicate, 1,000 loci were randomly sampled with replacement from
+the 6,074 SNP dataset and genome-wide FST was recalculated using Stacks
+`populations`.
+
+```{bash fst-bootstrap}
+#| eval: false
+
+for i in $(seq 1 1000); do
+
+  # Sample 1,000 loci with replacement from the full whitelist
+  shuf -r -n 1000 whitelist_chr1-22.txt > input/whitelist_boot_${i}.txt
+
+  # Run Stacks populations with bootstrap whitelist
+  populations \
+    -P stacks_output/ \
+    -M pop_map.txt \
+    -O bootstrap_output/boot_${i}/ \
+    -r 0.8 -R 0.8 \
+    --min-maf 0.05 \
+    --write-single-snp \
+    --fstats \
+    -W input/whitelist_boot_${i}.txt
+
+  # Extract genome-wide FST and append to results file
+  grep "^All" bootstrap_output/boot_${i}/populations.fst_summary.tsv | \
+    awk '{print $NF}' >> input/fst_bootstrap_values_combined.txt
+
+done
+
+# Output: input/fst_bootstrap_values_combined.txt (1,000 FST values)
+```
+
+## 0.7 PCA with Genodive
+
+PCA was performed using Genodive v3.04 (Meirmans, 2020), a GUI
+application that cannot be run from the command line. Refer to the
+Methods section of Currey et al. for full details.
+
+```{r genodive-note}
+#| eval: false
+
+# Input file:  input/populations.structure
+#              (generated by Stacks populations — Section 0.1)
+# Software:    Genodive v3.04
+#              https://www.bentleydrummer.nl/software/software/GenoDive.html
+# Method:      PCA using covariance method on individual genotype data
+# Markers:     6,074 SNPs from both collecting locations
+# Settings:    Default covariance PCA, no scaling
+#
+# Output file: input/250630_genetic_pca.txt
+#              Tab-delimited with columns:
+#              Individual, Population, PCA_axis_1, PCA_axis_2, ...
+#
+# Place this file at input/240829_Slep_geno_PCA.txt before running Section 2.
+```
+
+## 0.8 STRUCTURE and CLUMPAK
+
+Population genetic structure was investigated using STRUCTURE v2.3.4
+(Pritchard et al., 2000). Results were visualized using CLUMPAK. Refer
+to the Methods section of Currey et al. for full details. The Figure 3
+STRUCTURE bar plot is not reproduced programmatically in this document.
+
+```{r structure-note}
+#| eval: false
+
+# Input file:  input/populations.structure
+#              (generated by Stacks populations — Section 0.1)
+# Software:    STRUCTURE v2.3.4
+#              https://web.stanford.edu/group/pritchardlab/structure.html
+# K values:    K = 1 and K = 2
+# Replicates:  5 independent runs per K
+# Burn-in:     100,000 steps
+# MCMC reps:   100,000 steps
+# Model:       Admixture, correlated allele frequencies
+#
+# Results processed and visualized using CLUMPAK:
+# http://clumpak.tau.ac.il/
+```
+
+## 0.9 NeEstimator Settings
+
+The LD-based Ne estimate was obtained using NeEstimator v2 (Do et al.,
+2014). The GenePop input file is generated in Section 11. NeEstimator
+must be run manually after that section completes.
+
+```{r neestimator-note}
+#| eval: false
+
+# Input file:  output/populations_neestimator.gen
+#              (generated by Section 11 of this document)
+# Software:    NeEstimator v2
+#              https://www.montana.edu/kalinowski/Software/NeEstimator.htm
+# Method:      Linkage Disequilibrium
+# Pcrit:       0.05, 0.02, 0.01 (primary estimate: Pcrit = 0.02)
+# Mating:      Random mating
+# CI:          95% parametric confidence intervals
+#
+# Results reported in manuscript:
+# Ne = 36,282 (95% CI: 11,230 - Inf) at Pcrit = 0.02
+```
+
+------------------------------------------------------------------------
+
+# Section 1: Population Structure — FST Analysis (Figure 4)
+
+Per-SNP AMOVA FST between Causeway (population 1) and Valino Island
+(population 2) was calculated by the Stacks `populations` module (see
+Section 0.1). Chromosome-specific coordinates are converted to
+whole-genome Mb positions using linkage group information before
+plotting.
+
+```{r fst-coordinates}
+# Read linkage group information and FST data
+LGs.info <- read.table("input/Slep_LGs_MB.txt",
+                       sep = "\t", header = TRUE,
+                       stringsAsFactors = FALSE)
+data <- read.table("input/populations.fst_1-2.txt",
+                   sep = "\t", header = TRUE)
+
+# Convert chromosome-specific coordinates to whole-genome Mb positions
+chromosome <- 4  # column containing chromosome label
+bp         <- 5  # column containing chromosome-specific bp position
+
+genomic <- NULL
+for (i in 1:nrow(data)) {
+  chr     <- data[i, chromosome]
+  pos     <- data[i, bp]
+  chr.add <- LGs.info[LGs.info$chr == chr, 4]
+  pos     <- pos + chr.add
+  genomic <- append(genomic, pos)
+}
+
+data$Mb <- genomic / 1000000
+data     <- data[order(data$Mb), ]
+
+write.table(data, file = "output/populations.fst_1-2_MB.txt",
+            sep = "\t", quote = FALSE,
+            row.names = FALSE, col.names = TRUE)
+
+cat("Total loci processed:", nrow(data), "\n")
+cat("Genomic span:", round(min(data$Mb), 2), "-",
+    round(max(data$Mb), 2), "Mb\n")
+```
+
+```{r fst-plot}
+#| label: fig-04-fst
+#| fig-cap: "Figure 4. Genome-wide FST between Causeway and Valino Island. Each point represents a single locus colored alternately by chromosome. The solid black line shows the smoothed FST trend. The red dot on the y-axis indicates the genome-wide average FST (0.0074)."
+
+library(Hmisc)
+
+Scores <- read.table("output/populations.fst_1-2_MB.txt",
+                     sep = "\t", header = TRUE)
+
+palette(c("gray30", "gray70"))
+
+par(mar = c(4, 4, 2.5, 1), mgp = c(2.5, 0.7, 0))
+
+plot(Scores$Mb, Scores$AMOVA_Fst,
+     pch  = 16, cex  = 0.5, col  = Scores$Chr,
+     xlab = "Position (Mb)",
+     ylab = expression(italic(F)[ST]),
+     ylim = c(0, 0.1), main = "",
+     cex.lab = 1.2, cex.axis = 1.0,
+     las = 1, bty = "l", tcl = -0.3)
+
+lines(Scores$Mb, Scores$Smoothed_AMOVA_Fst, col = "black", lwd = 2)
+points(x = par("usr")[1], y = 0.0074, pch = 16, col = "#D32F2F", cex = 1.0)
+minor.tick(nx = 10)
+
+# Save PNG
+png("output/Figure_04_FST_genome_wide.png",
+    width = 8, height = 6, units = "in", res = 600, bg = "white")
+par(mar = c(4, 4, 2.5, 1), mgp = c(2.5, 0.7, 0))
+plot(Scores$Mb, Scores$AMOVA_Fst,
+     pch = 16, cex = 0.5, col = Scores$Chr,
+     xlab = "Position (Mb)", ylab = expression(italic(F)[ST]),
+     ylim = c(0, 0.1), main = "", cex.lab = 1.2, cex.axis = 1.0,
+     las = 1, bty = "l", tcl = -0.3)
+lines(Scores$Mb, Scores$Smoothed_AMOVA_Fst, col = "black", lwd = 2)
+points(x = par("usr")[1], y = 0.0074, pch = 16, col = "#D32F2F", cex = 1.0)
+minor.tick(nx = 10)
+dev.off()
+
+# Save PDF
+pdf("output/Figure_04_FST_genome_wide.pdf", width = 8, height = 6, bg = "white")
+par(mar = c(4, 4, 2.5, 1), mgp = c(2.5, 0.7, 0))
+plot(Scores$Mb, Scores$AMOVA_Fst,
+     pch = 16, cex = 0.5, col = Scores$Chr,
+     xlab = "Position (Mb)", ylab = expression(italic(F)[ST]),
+     ylim = c(0, 0.1), main = "", cex.lab = 1.2, cex.axis = 1.0,
+     las = 1, bty = "l", tcl = -0.3)
+lines(Scores$Mb, Scores$Smoothed_AMOVA_Fst, col = "black", lwd = 2)
+points(x = par("usr")[1], y = 0.0074, pch = 16, col = "#D32F2F", cex = 1.0)
+minor.tick(nx = 10)
+dev.off()
+
+cat("Figure 4 saved to output/\n")
+cat("Mean FST:", round(mean(Scores$AMOVA_Fst, na.rm = TRUE), 4), "\n")
+cat("Chromosomes:", length(unique(Scores$Chr)), "\n")
+```
+
+------------------------------------------------------------------------
+
+# Section 2: Principal Component Analysis (Figure 2)
+
+PCA was performed in Genodive v3.04 using 6,074 SNPs (see Section 0.7).
+PCA scores are imported here for visualization.
+
+```{r pca-plot}
+#| label: fig-02-pca
+#| fig-cap: "Figure 2. PCA of genetic variation between Causeway and Valino Island. PC1 (2.0%) and PC2 (1.6%) explain 3.6% of total genetic variance. Individuals overlap extensively with no clear clustering by site."
+
+Scores <- read.table("input/250630_genetic_pca.txt",
+                     sep = "\t", header = TRUE,
+                     fill = TRUE, check.names = FALSE)
+
+# The second column is sample ID with no header — rename it
+colnames(Scores)[2] <- "Sample_ID"
+
+# Confirm column names
+cat("Columns:", paste(colnames(Scores)[1:5], collapse = ", "), "\n")
+cat("Populations:", unique(Scores$Population), "\n")
+cat("Samples:", nrow(Scores), "\n")
+
+pca_plot <- ggplot(Scores,
+                   aes(x = PCA_axis_1, y = PCA_axis_2,
+                       fill = Population, shape = Population)) +
+  geom_point(size = 3, color = "black", stroke = 0.5) +
+  scale_fill_manual(values  = c("Causeway"      = "gray30",
+                                "Valino_Island" = "gray80")) +
+  scale_shape_manual(values = c("Causeway"      = 21,
+                                "Valino_Island" = 24)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray60") +
+  labs(x = "PC 1 (2.0%)", y = "PC 2 (1.6%)",
+       fill = "Location", shape = "Location") +
+  theme_classic(base_size = 13) +
+  theme(legend.position = "top",
+        axis.text    = element_text(color = "black"),
+        panel.border = element_rect(color = "black", fill = NA))
+
+print(pca_plot)
+
+ggsave("output/Figure_02_PCA.png", pca_plot,
+       width = 8, height = 7, dpi = 600, bg = "white")
+ggsave("output/Figure_02_PCA.pdf", pca_plot,
+       width = 8, height = 7, device = cairo_pdf)
+
+cat("Figure 2 saved to output/\n")
+```
+
+------------------------------------------------------------------------
+
+# Section 3: Permutation Test for FST Significance (Supplementary Figure 2)
+
+100 permutation replicates were generated using Stacks on Talapas HPC
+(see Section 0.5). Results are visualized here.
+
+```{r permutation-test}
+#| label: fig-supp-02-permutation
+#| fig-cap: "Supplementary Figure 2. Permutation test for population genetic differentiation. Distribution of FST values from 100 permutation replicates (white bars). The dashed vertical line indicates the observed FST (0.0074). Gray bars represent permuted values greater than or equal to the observed value."
+
+permuted_fst <- read.table("input/permuted_fst_values.txt",
+                           header = FALSE, col.names = "Fst") %>%
+  filter(!is.na(Fst))
+
+observed_fst    <- 0.0074
+n_greater_equal <- sum(permuted_fst$Fst >= observed_fst)
+total_perms     <- nrow(permuted_fst)
+p_value         <- (n_greater_equal + 1) / (total_perms + 1)
+
+cat("=== PERMUTATION TEST STATISTICS ===\n")
+cat("Observed FST:", sprintf("%.6f", observed_fst), "\n")
+cat("Permutations: n =", total_perms, "\n")
+cat("P-value:", sprintf("%.3f", p_value), "\n")
+cat("Mean permuted FST:", sprintf("%.6f", mean(permuted_fst$Fst)), "\n")
+
+fig_perm <- ggplot(permuted_fst, aes(x = Fst)) +
+  geom_histogram(bins = 20, fill = "white", color = "black",
+                 alpha = 0.9, linewidth = 0.3) +
+  geom_histogram(data = filter(permuted_fst, Fst >= observed_fst),
+                 aes(x = Fst), bins = 20, fill = "gray30",
+                 color = "black", alpha = 0.8, linewidth = 0.3) +
+  geom_vline(xintercept = observed_fst, color = "black",
+             linetype = "dashed", linewidth = 0.8) +
+  labs(x = expression(paste("Permuted ", italic("F")[ST], " values")),
+       y = "Frequency") +
+  theme_classic(base_size = 11) +
+  theme(axis.line  = element_line(color = "black", linewidth = 0.5),
+        axis.text  = element_text(color = "black", size = 10),
+        axis.title = element_text(color = "black", size = 11),
+        panel.grid = element_blank(),
+        plot.margin = margin(15, 15, 15, 15)) +
+  scale_x_continuous(
+    limits = c(0.0073, 0.0085),
+    breaks = seq(0.0074, 0.0084, by = 0.001),
+    labels = function(x) sprintf("%.4f", x),
+    expand = c(0.02, 0)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+
+print(fig_perm)
+
+ggsave("output/Supp_Fig_02_Permutation_FST.png", fig_perm,
+       width = 89, height = 70, units = "mm", dpi = 600, bg = "white")
+ggsave("output/Supp_Fig_02_Permutation_FST.pdf", fig_perm,
+       width = 89, height = 70, units = "mm",
+       device = cairo_pdf, bg = "white")
+
+cat("Supplementary Figure 2 saved to output/\n")
+```
+
+------------------------------------------------------------------------
+
+# Section 4: Bootstrap Resampling of FST (Supplementary Figure 3)
+
+1,000 bootstrap replicates were generated using Stacks on Talapas HPC
+(see Section 0.6). Results are visualized here.
+
+```{r bootstrap-fst}
+#| label: fig-supp-03-bootstrap
+#| fig-cap: "Supplementary Figure 3. Bootstrap distribution of FST values from 1,000 replicates. The solid red line shows the observed FST (0.0074). Dashed gray lines show 95% confidence interval bounds."
+
+fst_values <- read.table("input/fst_bootstrap_values_combined.txt",
+                         header = FALSE)$V1
+fst_values <- fst_values[is.finite(fst_values)]
+
+mean_fst            <- mean(fst_values)
+sd_fst              <- sd(fst_values)
+ci_95               <- quantile(fst_values, c(0.025, 0.975))
+observed_percentile <- sum(fst_values <= observed_fst) /
+                       length(fst_values) * 100
+
+cat("=== BOOTSTRAP FST STATISTICS ===\n")
+cat("N replicates:", length(fst_values), "\n")
+cat("Bootstrap mean FST:", round(mean_fst, 6), "\n")
+cat("Bootstrap SD:", round(sd_fst, 6), "\n")
+cat("95% CI:", round(ci_95[1], 6), "-", round(ci_95[2], 6), "\n")
+cat("Observed FST percentile:", round(observed_percentile, 1), "%\n")
+cat("Difference from bootstrap mean:",
+    sprintf("%.6f", abs(mean_fst - observed_fst)), "\n")
+
+fig_boot <- ggplot(data.frame(Fst = fst_values), aes(x = Fst)) +
+  geom_histogram(bins = 50, fill = "lightblue", color = "black",
+                 alpha = 0.8, linewidth = 0.3) +
+  geom_vline(aes(xintercept = ci_95[1]), color = "gray60",
+             linetype = "dashed", linewidth = 0.6, alpha = 0.7) +
+  geom_vline(aes(xintercept = ci_95[2]), color = "gray60",
+             linetype = "dashed", linewidth = 0.6, alpha = 0.7) +
+  geom_vline(aes(xintercept = observed_fst), color = "red",
+             linetype = "solid", linewidth = 0.8) +
+  labs(x = expression(paste(F[ST])), y = "Frequency") +
+  theme_classic(base_size = 12) +
+  theme(axis.title = element_text(size = 14, face = "bold"),
+        axis.text  = element_text(size = 12, color = "black"),
+        axis.line  = element_line(color = "black", linewidth = 0.8),
+        panel.grid = element_blank()) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_x_continuous(expand = expansion(mult = c(0.02, 0.02)))
+
+print(fig_boot)
+
+ggsave("output/Supp_Fig_03_Bootstrap_FST.png", fig_boot,
+       width = 8, height = 6, dpi = 600, bg = "white")
+ggsave("output/Supp_Fig_03_Bootstrap_FST.pdf", fig_boot,
+       width = 8, height = 6, device = cairo_pdf, bg = "white")
+
+cat("Supplementary Figure 3 saved to output/\n")
+```
+
+------------------------------------------------------------------------
+
+# Section 5: Kinship Analysis
+
+Pairwise kinship was estimated using four methods in SNPRelate v1.38.1.
+LD pruning was applied prior to analysis (10 kb window, r² \< 0.2). The
+Method of Moments (MoM) is the primary method reported in the
+manuscript.
+
+```{r kinship-calculation}
+vcf_file <- "input/populations.snps.vcf"
+gds_file <- "input/data.gds"
+
+snpgdsVCF2GDS(vcf.fn  = vcf_file,
+              out.fn  = gds_file,
+              method  = "biallelic.only",
+              verbose = TRUE)
+
+genofile  <- snpgdsOpen(gds_file)
+set.seed(100)
+snpset    <- snpgdsLDpruning(genofile, ld.threshold = 0.2, verbose = FALSE)
+snpset.id <- unlist(snpset)
+cat("SNPs after LD pruning:", length(snpset.id), "\n")
+
+matrix_to_table <- function(mat, sample_ids, col_name) {
+  res <- data.frame()
+  for (i in 1:(length(sample_ids) - 1)) {
+    for (j in (i + 1):length(sample_ids)) {
+      res <- rbind(res, data.frame(ID1 = sample_ids[i],
+                                   ID2 = sample_ids[j],
+                                   value = mat[i, j]))
+    }
+  }
+  colnames(res)[3] <- col_name
+  return(res)
+}
+
+# Method of Moments (MoM) — primary method
+mom_res   <- snpgdsIBDMoM(genofile, snp.id = snpset.id,
+                           kinship = TRUE, verbose = FALSE)
+mom_table <- matrix_to_table(mom_res$kinship, mom_res$sample.id,
+                             "Kinship_MoM")
+write.csv(mom_table, "output/kinship_mom_results.csv", row.names = FALSE)
+
+# KING-robust
+king_res   <- snpgdsIBDKING(genofile, snp.id = snpset.id, verbose = FALSE)
+king_table <- matrix_to_table(king_res$kinship, king_res$sample.id, "Kinship")
+write.csv(king_table, "output/kinship_king.csv", row.names = FALSE)
+
+# IBS
+ibs_res   <- snpgdsIBS(genofile, snp.id = snpset.id,
+                        num.thread = 2, verbose = FALSE)
+ibs_table <- matrix_to_table(ibs_res$ibs, ibs_res$sample.id, "IBS")
+write.csv(ibs_table, "output/kinship_ibs.csv", row.names = FALSE)
+
+# MLE
+mle_res   <- snpgdsIBDMLE(genofile, snp.id = snpset.id,
+                           kinship = TRUE, verbose = FALSE)
+mle_table <- matrix_to_table(mle_res$kinship, mle_res$sample.id, "Kinship")
+write.csv(mle_table, "output/kinship_mle.csv", row.names = FALSE)
+
+snpgdsClose(genofile)
+cat("Kinship results saved to output/\n")
+```
+
+------------------------------------------------------------------------
+
+# Section 6: Kinship Heatmap (Supplementary Figure 4)
+
+```{r kinship-heatmap}
+#| label: fig-supp-04-kinship
+#| fig-cap: "Supplementary Figure 4. Pairwise kinship heatmap. V = Valino Island, C = Causeway. Color scale: blue = unrelated, red = closely related. Diagonal = self-kinship (0.5)."
+
+# Note: reads from output/ since this file is created in Section 5
+pairwise_data <- read.csv("output/kinship_mom_results.csv",
+                           stringsAsFactors = FALSE,
+                           colClasses = c("ID1" = "character",
+                                          "ID2" = "character"))
+
+all_samples      <- sort(unique(c(pairwise_data$ID1, pairwise_data$ID2)))
+n_samples        <- length(all_samples)
+causeway_samples <- all_samples[grepl("3900", all_samples)]
+valino_samples   <- all_samples[grepl("3899", all_samples)]
+
+cat("Valino Island samples:", length(valino_samples), "\n")
+cat("Causeway samples:", length(causeway_samples), "\n")
+
+kinship_matrix <- matrix(0, nrow = n_samples, ncol = n_samples,
+                          dimnames = list(all_samples, all_samples))
+diag(kinship_matrix) <- 0.5
+
+for (i in 1:nrow(pairwise_data)) {
+  id1 <- pairwise_data$ID1[i]
+  id2 <- pairwise_data$ID2[i]
+  val <- as.numeric(pairwise_data$Kinship_MoM[i])
+  if (!is.na(val) && id1 %in% all_samples && id2 %in% all_samples) {
+    kinship_matrix[id1, id2] <- val
+    kinship_matrix[id2, id1] <- val
+  }
+}
+
+ordered_samples <- c(valino_samples, causeway_samples)
+matrix_ordered  <- kinship_matrix[ordered_samples, ordered_samples]
+simple_labels   <- c(paste0("V", seq_along(valino_samples)),
+                     paste0("C", seq_along(causeway_samples)))
+rownames(matrix_ordered) <- simple_labels
+colnames(matrix_ordered) <- simple_labels
+
+location_annotation <- data.frame(
+  Location  = c(rep("Valino Island", length(valino_samples)),
+                rep("Causeway",      length(causeway_samples))),
+  row.names = simple_labels)
+
+heatmap_params <- list(
+  matrix_ordered,
+  color = colorRampPalette(c(
+    "#08519c", "#3182bd", "#6baed6", "#9ecae1", "#c6dbef",
+    "#eff3ff", "#fee0d2", "#fcbba1", "#fc9272", "#fb6a4a",
+    "#ef3b2c", "#cb181d", "#a50f15"))(100),
+  cluster_rows         = FALSE,
+  cluster_cols         = FALSE,
+  show_rownames        = FALSE,
+  show_colnames        = FALSE,
+  annotation_row       = location_annotation,
+  annotation_col       = location_annotation,
+  annotation_colors    = list(Location = c(
+    "Valino Island" = "#1f4e79", "Causeway" = "#d4910c")),
+  annotation_names_row = FALSE,
+  annotation_names_col = FALSE,
+  annotation_legend    = TRUE,
+  main                 = "",
+  gaps_row             = length(valino_samples),
+  gaps_col             = length(valino_samples),
+  border_color         = "#2d2d2d",
+  legend               = TRUE,
+  legend_breaks        = c(0, 0.1, 0.2, 0.3, 0.4, 0.5),
+  legend_labels        = c("0.0", "0.1", "0.2", "0.3", "0.4", "0.5"),
+  treeheight_row       = 0,
+  treeheight_col       = 0)
+
+do.call(pheatmap, heatmap_params)
+
+png("output/Supp_Fig_04_Kinship_Heatmap.png",
+    width = 10, height = 8, units = "in", res = 600)
+do.call(pheatmap, heatmap_params)
+dev.off()
+
+pdf("output/Supp_Fig_04_Kinship_Heatmap.pdf", width = 10, height = 8)
+do.call(pheatmap, heatmap_params)
+dev.off()
+
+cat("Supplementary Figure 4 saved to output/\n")
+```
+
+------------------------------------------------------------------------
+
+# Section 7: Genome-wide LD Heatmap (Figure 5)
+
+Genome-wide LD was calculated using PLINK2 on Beagle-phased data
+(Sections 0.3 and 0.4). Data aggregated into 1 Mb bins. Panel A uses
+maximum aggregation for r²; Panel B uses mean aggregation for D'.
+
+```{r ld-heatmap-functions}
+read_vcor_file <- function(file_path) {
+  vcor_data <- fread(file_path, header = TRUE)
+  if ("#CHROM_A" %in% names(vcor_data))
+    names(vcor_data)[names(vcor_data) == "#CHROM_A"] <- "CHROM_A"
+  vcor_data$Distance <- ifelse(
+    vcor_data$CHROM_A == vcor_data$CHROM_B,
+    abs(vcor_data$POS_B - vcor_data$POS_A), Inf)
+  return(vcor_data)
+}
+
+create_genomic_bins <- function(vcor_data, bin_size = 1000000) {
+  vcor_data$CHROM_A <- as.numeric(vcor_data$CHROM_A)
+  vcor_data$CHROM_B <- as.numeric(vcor_data$CHROM_B)
+  vcor_data$POS_A   <- as.numeric(vcor_data$POS_A)
+  vcor_data$POS_B   <- as.numeric(vcor_data$POS_B)
+  vcor_data <- vcor_data[complete.cases(
+    vcor_data[, c("CHROM_A","CHROM_B","POS_A","POS_B")]), ]
+  vcor_data$bin_A <- paste0(vcor_data$CHROM_A, "_",
+                             floor(vcor_data$POS_A / bin_size))
+  vcor_data$bin_B <- paste0(vcor_data$CHROM_B, "_",
+                             floor(vcor_data$POS_B / bin_size))
+  return(vcor_data)
+}
+
+aggregate_ld_by_bins <- function(vcor_data, metric = "r2", method = "mean") {
+  ld_col <- if (metric == "r2") "PHASED_R2" else "ABS_DPRIME"
+  fn     <- switch(method, mean = mean, max = max, median = median)
+  vcor_data %>%
+    group_by(bin_A, bin_B) %>%
+    summarise(avg_ld = fn(.data[[ld_col]], na.rm = TRUE),
+              count = n(), .groups = "drop")
+}
+
+create_bin_order <- function(bin_names) {
+  bin_info <- data.frame(
+    bin     = bin_names,
+    chrom   = as.numeric(gsub("_.*", "", bin_names)),
+    bin_num = as.numeric(gsub(".*_", "", bin_names)))
+  bin_info[order(bin_info$chrom, bin_info$bin_num), "bin"]
+}
+
+generate_ld_heatmap <- function(vcor_file, metric = "r2",
+                                 bin_size = 1000000,
+                                 aggregation_method = "mean",
+                                 panel_label = "") {
+  vcor_data <- read_vcor_file(vcor_file)
+  vcor_data <- create_genomic_bins(vcor_data, bin_size)
+  bin_ld    <- aggregate_ld_by_bins(vcor_data, metric, aggregation_method)
+  all_bins  <- unique(c(bin_ld$bin_A, bin_ld$bin_B))
+  bin_order <- create_bin_order(all_bins)
+
+  bin_ld_sym <- bind_rows(
+    bin_ld,
+    bin_ld %>%
+      dplyr::select(bin_A = bin_B, bin_B = bin_A, avg_ld, count) %>%
+      anti_join(bin_ld, by = c("bin_A", "bin_B")))
+  diagonal_data <- data.frame(bin_A = all_bins, bin_B = all_bins,
+                               avg_ld = 1.0, count = 1)
+  bin_ld_final <- bind_rows(bin_ld_sym %>% filter(bin_A != bin_B),
+                             diagonal_data)
+
+  all_bins_final <- sort(unique(c(bin_ld_final$bin_A, bin_ld_final$bin_B)))
+  complete_combinations <- expand.grid(
+    bin_A = all_bins_final, bin_B = all_bins_final, stringsAsFactors = FALSE)
+  bin_ld_complete <- complete_combinations %>%
+    left_join(bin_ld_final, by = c("bin_A", "bin_B")) %>%
+    mutate(avg_ld = ifelse(is.na(avg_ld), 0, avg_ld),
+           count  = ifelse(is.na(count),  0, count))
+  bin_ld_complete$bin_A <- factor(bin_ld_complete$bin_A, levels = bin_order)
+  bin_ld_complete$bin_B <- factor(bin_ld_complete$bin_B, levels = bin_order)
+
+  if (metric == "r2") {
+    panel_title <- bquote(bold(.(panel_label)) ~ r^2 ~ "linkage disequilibrium")
+    fill_label  <- bquote(r^2)
+  } else {
+    panel_title <- bquote(bold(.(panel_label)) ~ D*"'" ~ "linkage disequilibrium")
+    fill_label  <- bquote(D*"'")
+  }
+
+  bin_chroms <- data.frame(
+    bin   = bin_order,
+    chrom = as.numeric(gsub("_.*", "", bin_order)))
+  chrom_boundaries <- bin_chroms %>%
+    group_by(chrom) %>%
+    summarise(first_pos = which(bin_order == dplyr::first(bin)),
+              last_pos  = which(bin_order == dplyr::last(bin)),
+              mid_pos   = (first_pos + last_pos) / 2, .groups = "drop")
+  chrom_breaks <- bin_order[round(chrom_boundaries$mid_pos)]
+  chrom_labels <- chrom_boundaries$chrom
+  boundary_pos <- chrom_boundaries$last_pos[-nrow(chrom_boundaries)] + 0.5
+
+  ggplot(bin_ld_complete, aes(x = bin_A, y = bin_B, fill = avg_ld)) +
+    geom_tile() +
+    scale_x_discrete(breaks = chrom_breaks, labels = chrom_labels,
+                     expand = c(0, 0)) +
+    scale_y_discrete(breaks = chrom_breaks, labels = chrom_labels,
+                     limits = rev(levels(bin_ld_complete$bin_B)),
+                     expand = c(0, 0)) +
+    scale_fill_gradient2(
+      low = "#2166ac", mid = "#5aae61", high = "#d73027",
+      midpoint = 0.5, limits = c(0, 1),
+      breaks = c(0, 0.25, 0.5, 0.75, 1.0),
+      labels = c("0.0", "0.25", "0.50", "0.75", "1.0"),
+      name = fill_label, na.value = "white") +
+    geom_vline(xintercept = boundary_pos, color = "black",
+               linewidth = 0.3, alpha = 0.8) +
+    geom_hline(yintercept = length(bin_order) - boundary_pos + 1,
+               color = "black", linewidth = 0.3, alpha = 0.8) +
+    labs(title = panel_title, x = "Chromosome", y = "Chromosome") +
+    theme_minimal(base_size = 11) +
+    theme(plot.title       = element_text(hjust = 0.5, size = 14, face = "bold"),
+          axis.title       = element_text(size = 12, face = "bold"),
+          axis.text        = element_text(size = 9, color = "black"),
+          legend.title     = element_text(size = 11, face = "bold"),
+          panel.grid       = element_blank(),
+          panel.border     = element_rect(color = "black", fill = NA,
+                                          linewidth = 0.8),
+          plot.background  = element_rect(fill = "white", color = NA),
+          panel.background = element_rect(fill = "white", color = NA),
+          aspect.ratio     = 1)
+}
+```
+
+```{r ld-heatmap-plot}
+#| label: fig-05-ld-heatmap
+#| fig-cap: "Figure 5. Genome-wide LD heatmaps. (A) Maximum r² values. (B) Mean D' values. Both aggregated into 1 Mb bins across 22 chromosomes. Black lines mark chromosome boundaries."
+#| fig-width: 14
+#| fig-height: 28
+
+input_file <- "input/Slep_full_LD.vcor"
+
+p_r2     <- generate_ld_heatmap(input_file, metric = "r2",
+                                 aggregation_method = "max",  panel_label = "A")
+p_dprime <- generate_ld_heatmap(input_file, metric = "dprime",
+                                 aggregation_method = "mean", panel_label = "B")
+
+combined_ld <- p_r2 / p_dprime
+print(combined_ld)
+
+# Save individual panels
+ggsave("output/Figure_05A_r2.png", p_r2,
+       width = 12, height = 12, dpi = 600, bg = "white")
+ggsave("output/Figure_05B_dprime.png", p_dprime,
+       width = 12, height = 12, dpi = 600, bg = "white")
+
+# Save combined figure
+ggsave("output/Figure_05_LD_Heatmap.png", combined_ld,
+       width = 14, height = 28, dpi = 600, bg = "white")
+ggsave("output/Figure_05_LD_Heatmap.pdf", combined_ld,
+       width = 14, height = 28, device = cairo_pdf, bg = "white")
+
+cat("Figure 5 saved to output/\n")
+```
+
+------------------------------------------------------------------------
+
+# Section 8: LD Decay and R² vs D' Correlation (Supplementary Figure 5)
+
+```{r ld-decay}
+#| label: fig-supp-05-ld-decay
+#| fig-cap: "Supplementary Figure 5. (A) r² vs D' relationship for intra-chromosomal SNP pairs within 5 Mb. (B) Fine-scale LD decay ≤500 kb, 10 kb bins. (C) Broad-scale LD decay ≤5 Mb, 100 kb bins. Transparent points = raw data; solid lines and points = binned means."
+#| fig-width: 16
+#| fig-height: 12
+
+ld_data <- fread("input/Slep_full_LD.vcor", header = TRUE)
+if ("#CHROM_A" %in% names(ld_data))
+  names(ld_data)[names(ld_data) == "#CHROM_A"] <- "CHROM_A"
+
+intra_data <- ld_data[ld_data$CHROM_A == ld_data$CHROM_B, ]
+intra_data$Distance     <- abs(intra_data$POS_B - intra_data$POS_A)
+intra_data              <- intra_data[intra_data$Distance <= 5000000, ]
+intra_data$Log_Distance <- log10(intra_data$Distance + 1)
+
+overall_cor <- cor(intra_data$PHASED_R2, intra_data$ABS_DPRIME,
+                   use = "complete.obs")
+cat("Overall r² vs D' correlation:", round(overall_cor, 4), "\n")
+
+model1 <- lm(PHASED_R2 ~ ABS_DPRIME,                data = intra_data)
+model2 <- lm(PHASED_R2 ~ ABS_DPRIME + Log_Distance, data = intra_data)
+model3 <- lm(PHASED_R2 ~ ABS_DPRIME * Log_Distance, data = intra_data)
+cat("Model 1 R²:", round(summary(model1)$r.squared, 4), "\n")
+cat("Model 2 R²:", round(summary(model2)$r.squared, 4), "\n")
+cat("Model 3 R²:", round(summary(model3)$r.squared, 4), "\n")
+
+partial_cor <- pcor.test(intra_data$PHASED_R2, intra_data$ABS_DPRIME,
+                         intra_data$Log_Distance)
+cat("Partial correlation (controlling for distance):",
+    round(partial_cor$estimate, 4), "\n")
+
+plot_data <- if (nrow(intra_data) > 25000)
+  intra_data[sample(nrow(intra_data), 25000), ] else intra_data
+
+p_a <- ggplot(plot_data, aes(x = PHASED_R2, y = ABS_DPRIME)) +
+  geom_point(alpha = 0.5, size = 0.8, color = "#2166AC", stroke = 0) +
+  scale_x_continuous(name = expression(bold(r^2)),
+                     limits = c(0,1), breaks = seq(0,1,0.2)) +
+  scale_y_continuous(name = expression(bold(D*"'")),
+                     limits = c(0,1), breaks = seq(0,1,0.2)) +
+  labs(title = expression(bold("A) " * r^2 * " vs " * D*"'")),
+       subtitle = paste0("All chromosomes | ≤5 Mb | n = ",
+                         format(nrow(intra_data), big.mark=","),
+                         " SNP pairs | r = ", round(overall_cor, 3))) +
+  theme_classic(base_size = 12) +
+  theme(plot.title    = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, color = "gray40"),
+        panel.border  = element_rect(color = "black", fill = NA),
+        aspect.ratio  = 1)
+
+create_ld_decay_plot <- function(plot_data, max_distance_kb,
+                                  bin_size_kb, title_suffix) {
+  max_bp  <- max_distance_kb * 1000
+  bin_bp  <- bin_size_kb * 1000
+  x_unit  <- if (max_distance_kb <= 1000) "kb" else "Mb"
+  x_scale <- if (x_unit == "kb") 1000 else 1000000
+  decay_raw <- plot_data %>% filter(Distance <= max_bp) %>% arrange(Distance)
+  decay_binned <- decay_raw %>%
+    mutate(Distance_Bin = floor(Distance / bin_bp) * bin_bp) %>%
+    group_by(Distance_Bin) %>%
+    summarise(mean_distance = mean(Distance,   na.rm = TRUE),
+              mean_r2       = mean(PHASED_R2,  na.rm = TRUE),
+              mean_dprime   = mean(ABS_DPRIME, na.rm = TRUE),
+              n_pairs       = n(), .groups = "drop") %>%
+    filter(n_pairs >= 5) %>% arrange(mean_distance)
+  ggplot() +
+    geom_point(data = decay_raw,
+               aes(x = Distance/x_scale, y = PHASED_R2,  color = "R²"),
+               alpha = 0.1, size = 0.4) +
+    geom_point(data = decay_raw,
+               aes(x = Distance/x_scale, y = ABS_DPRIME, color = "D'"),
+               alpha = 0.1, size = 0.4) +
+    geom_line(data = decay_binned,
+              aes(x = mean_distance/x_scale, y = mean_r2,    color = "R²"),
+              linewidth = 1.2) +
+    geom_line(data = decay_binned,
+              aes(x = mean_distance/x_scale, y = mean_dprime, color = "D'"),
+              linewidth = 1.2) +
+    geom_point(data = decay_binned,
+               aes(x = mean_distance/x_scale, y = mean_r2,    color = "R²"),
+               size = 2) +
+    geom_point(data = decay_binned,
+               aes(x = mean_distance/x_scale, y = mean_dprime, color = "D'"),
+               size = 2) +
+    scale_color_manual(values = c("R²" = "#0072B2", "D'" = "#D55E00"),
+                       name = "LD Metric") +
+    scale_x_continuous(name = paste0("Distance (", x_unit, ")")) +
+    scale_y_continuous(name = "Linkage Disequilibrium",
+                       limits = c(0,1), breaks = seq(0,1,0.2)) +
+    labs(title = title_suffix) +
+    theme_classic(base_size = 12) +
+    theme(plot.title      = element_text(hjust = 0.5, face = "bold"),
+          legend.position = "bottom",
+          panel.border    = element_rect(color = "black", fill = NA))
+}
+
+p_b <- create_ld_decay_plot(plot_data, 500,  10,  "B) LD Decay (≤500 kb)")
+p_c <- create_ld_decay_plot(plot_data, 5000, 100, "C) LD Decay (≤5 Mb)")
+
+combined_ld_decay <- p_a / (p_b | p_c)
+print(combined_ld_decay)
+
+ggsave("output/Supp_Fig_05_LD_Decay.png", combined_ld_decay,
+       width = 16, height = 12, dpi = 600, bg = "white")
+ggsave("output/Supp_Fig_05_LD_Decay.pdf", combined_ld_decay,
+       width = 16, height = 12, device = cairo_pdf, bg = "white")
+
+cat("Supplementary Figure 5 saved to output/\n")
+```
+
+------------------------------------------------------------------------
+
+# Section 9: Chromosome 1 Elevated LD Region Analysis
+
+Regions of elevated LD on chromosome 1 were identified using sliding 1
+Mb windows (minimum 10 SNP pairs per window). Thresholds = mean + 2SD of
+non-chromosome-1 windows.
+
+```{r chr1-ld-windows}
+#| label: fig-chr1-ld
+#| fig-cap: "Chromosome 1 sliding window LD analysis (1 Mb windows). Dashed lines = genome-wide thresholds (mean + 2SD, excluding Chr 1). Shaded region = contiguous elevated windows consistent with reduced recombination."
+
+window_size <- 1000000
+
+calculate_window_ld <- function(chrom_data, chrom_name, window_size) {
+  all_pos       <- sort(unique(c(chrom_data$POS_A, chrom_data$POS_B)))
+  max_pos       <- max(all_pos)
+  window_starts <- seq(0, max_pos, by = window_size)
+  results       <- data.frame()
+  for (ws in window_starts) {
+    we <- ws + window_size
+    window_pairs <- chrom_data[
+      chrom_data$POS_A >= ws & chrom_data$POS_A < we &
+      chrom_data$POS_B >= ws & chrom_data$POS_B < we, ]
+    if (nrow(window_pairs) >= 10) {
+      results <- rbind(results, data.frame(
+        Chromosome   = chrom_name,
+        Window_Start = ws,
+        Window_End   = we,
+        Window_Mid   = (ws + we) / 2,
+        Mean_R2      = mean(window_pairs$PHASED_R2,  na.rm = TRUE),
+        Mean_Dprime  = mean(window_pairs$ABS_DPRIME, na.rm = TRUE),
+        N_Pairs      = nrow(window_pairs)))
+    }
+  }
+  return(results)
+}
+
+all_window_results <- data.frame()
+chromosomes        <- unique(ld_data$CHROM_A)
+for (chr in chromosomes) {
+  chr_data    <- ld_data[ld_data$CHROM_A == chr, ]
+  chr_results <- calculate_window_ld(chr_data, chr, window_size)
+  all_window_results <- rbind(all_window_results, chr_results)
+}
+
+chr1_name        <- sort(unique(ld_data$CHROM_A))[1]
+non_chr1_windows <- all_window_results[
+  all_window_results$Chromosome != chr1_name, ]
+threshold_r2     <- mean(non_chr1_windows$Mean_R2,     na.rm = TRUE) +
+                    2 * sd(non_chr1_windows$Mean_R2,   na.rm = TRUE)
+threshold_dprime <- mean(non_chr1_windows$Mean_Dprime, na.rm = TRUE) +
+                    2 * sd(non_chr1_windows$Mean_Dprime, na.rm = TRUE)
+
+cat("r² threshold (mean + 2SD):", round(threshold_r2, 4), "\n")
+cat("D' threshold (mean + 2SD):", round(threshold_dprime, 4), "\n")
+
+chr1_windows          <- all_window_results[
+  all_window_results$Chromosome == chr1_name, ]
+chr1_windows$Elevated <- chr1_windows$Mean_R2     > threshold_r2 |
+                         chr1_windows$Mean_Dprime > threshold_dprime
+elevated_windows      <- chr1_windows[chr1_windows$Elevated, ]
+
+cat("Chr 1 total windows:", nrow(chr1_windows), "\n")
+cat("Chr 1 elevated windows:", nrow(elevated_windows), "\n")
+
+if (nrow(elevated_windows) > 0) {
+  region_start   <- min(elevated_windows$Window_Start)
+  region_end     <- max(elevated_windows$Window_End)
+  chr1_data      <- ld_data[ld_data$CHROM_A == chr1_name, ]
+  elevated_pairs <- chr1_data[
+    chr1_data$POS_A >= region_start & chr1_data$POS_A < region_end &
+    chr1_data$POS_B >= region_start & chr1_data$POS_B < region_end, ]
+  non_chr1_pairs <- ld_data[ld_data$CHROM_A != chr1_name, ]
+  gw_mean_r2     <- mean(non_chr1_pairs$PHASED_R2,  na.rm = TRUE)
+  gw_mean_dprime <- mean(non_chr1_pairs$ABS_DPRIME, na.rm = TRUE)
+  cat("Elevated region:", region_start/1e6, "to", region_end/1e6, "Mb\n")
+  cat("Region size:", (region_end - region_start)/1e6, "Mb\n")
+  cat("SNP pairs in region:", nrow(elevated_pairs), "\n")
+  cat("r² fold-change:",
+      round(mean(elevated_pairs$PHASED_R2,  na.rm=TRUE)/gw_mean_r2, 2), "\n")
+  cat("D' fold-change:",
+      round(mean(elevated_pairs$ABS_DPRIME, na.rm=TRUE)/gw_mean_dprime, 2),
+      "\n")
+}
+
+p_chr1 <- ggplot(chr1_windows, aes(x = Window_Mid / 1e6)) +
+  {if (nrow(elevated_windows) > 0)
+    annotate("rect",
+             xmin = region_start/1e6, xmax = region_end/1e6,
+             ymin = -Inf, ymax = Inf, alpha = 0.15, fill = "gray30")} +
+  geom_line(aes(y = Mean_R2,     color = "r²"), linewidth = 0.8) +
+  geom_line(aes(y = Mean_Dprime, color = "D'"), linewidth = 0.8) +
+  geom_point(aes(y = Mean_R2,    color = "r²"), size = 1.5) +
+  geom_point(aes(y = Mean_Dprime, color = "D'"), size = 1.5) +
+  geom_hline(yintercept = threshold_r2,     color = "#0072B2",
+             linetype = "dashed", linewidth = 0.7) +
+  geom_hline(yintercept = threshold_dprime, color = "#D55E00",
+             linetype = "dashed", linewidth = 0.7) +
+  scale_color_manual(values = c("r²" = "#0072B2", "D'" = "#D55E00"),
+                     name = "LD Metric") +
+  scale_x_continuous(name = "Chromosomal Position (Mb)") +
+  scale_y_continuous(name = "Mean Linkage Disequilibrium",
+                     limits = c(0,1), breaks = seq(0,1,0.2)) +
+  labs(title    = "Chromosome 1 Sliding Window LD Analysis (1 Mb windows)",
+       subtitle = "Dashed lines: genome-wide threshold (mean + 2SD, excl. Chr 1)") +
+  theme_classic(base_size = 12) +
+  theme(plot.title       = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle    = element_text(hjust = 0.5, color = "gray40"),
+        legend.position  = "bottom",
+        panel.border     = element_rect(color = "black", fill = NA),
+        panel.grid.major = element_line(color = "gray90", linewidth = 0.5))
+
+print(p_chr1)
+
+ggsave("output/Chr1_elevated_LD_windows.png", p_chr1,
+       width = 10, height = 6, dpi = 600, bg = "white")
+ggsave("output/Chr1_elevated_LD_windows.pdf", p_chr1,
+       width = 10, height = 6, device = cairo_pdf, bg = "white")
+
+write.csv(all_window_results, "output/All_chromosome_window_LD.csv",
+          row.names = FALSE)
+write.csv(chr1_windows, "output/Chr1_window_LD.csv", row.names = FALSE)
+
+cat("Chr 1 LD analysis saved to output/\n")
+```
+
+------------------------------------------------------------------------
+
+# Section 10: Effective Population Size — Variance Method
+
+Contemporary Ne was estimated using the allele frequency variance method
+of Nei and Tajima (1981). 1,000 bootstrap replicates provide 95% and 90%
+confidence intervals. LD-pruned PLINK files from Section 0.3 are
+required.
+
+```{r ne-variance-method}
+if (!file.exists("input/populations_pruned.bed"))
+  stop("populations_pruned.bed not found. Run LD pruning — see Section 0.3.")
+
+runPLINK2("--bfile input/populations_pruned --freq --out input/pruned_freq")
+
+fam        <- fread("input/populations_pruned.fam", header = FALSE)
+n_samples  <- nrow(fam)
+bim        <- fread("input/populations_pruned.bim", header = FALSE)
+n_variants <- nrow(bim)
+
+freq      <- fread("input/pruned_freq.afreq")
+alt_freqs <- if ("ALT_FREQS" %in% colnames(freq)) freq$ALT_FREQS else
+             if ("ALT_FREQ"  %in% colnames(freq)) freq$ALT_FREQ  else
+             freq$A1_FREQ
+alt_freqs <- pmin(alt_freqs, 1 - alt_freqs, na.rm = TRUE)
+
+cat("Samples:", n_samples, "| SNPs:", n_variants,
+    "| Mean MAF:", round(mean(alt_freqs, na.rm = TRUE), 4), "\n")
+
+var_maf         <- var(alt_freqs, na.rm = TRUE)
+ne_var_original <- n_samples / (2 * var_maf)
+cat("Ne (variance method):", round(ne_var_original, 0), "\n")
+
+bootstrap_ne_variance <- function(allele_freqs, n_samples, n_bootstrap = 1000) {
+  clean_freqs  <- allele_freqs[!is.na(allele_freqs)]
+  ne_estimates <- numeric(n_bootstrap)
+  for (i in 1:n_bootstrap) {
+    boot_freqs      <- sample(clean_freqs, replace = TRUE)
+    ne_estimates[i] <- n_samples / (2 * var(boot_freqs))
+    if (i %% 200 == 0) cat("Bootstrap replicate", i, "of", n_bootstrap, "\n")
+  }
+  return(ne_estimates)
+}
+
+set.seed(123)
+bootstrap_results <- bootstrap_ne_variance(alt_freqs, n_samples, 1000)
+
+ci_95 <- quantile(bootstrap_results, c(0.025, 0.975), na.rm = TRUE)
+ci_90 <- quantile(bootstrap_results, c(0.05,  0.95),  na.rm = TRUE)
+
+cat("=== Ne VARIANCE METHOD RESULTS ===\n")
+cat("Ne estimate:", round(ne_var_original, 0), "\n")
+cat("Bootstrap mean:", round(mean(bootstrap_results, na.rm = TRUE), 0), "\n")
+cat("Bootstrap SD:", round(sd(bootstrap_results, na.rm = TRUE), 0), "\n")
+cat("95% CI:", round(ci_95[1], 0), "-", round(ci_95[2], 0), "\n")
+cat("90% CI:", round(ci_90[1], 0), "-", round(ci_90[2], 0), "\n")
+
+variance_results <- data.frame(
+  Method           = "Variance (Nei & Tajima 1981)",
+  Sample_Size      = n_samples,
+  SNPs_Used        = n_variants,
+  Mean_MAF         = round(mean(alt_freqs, na.rm = TRUE), 4),
+  MAF_Variance     = round(var_maf, 6),
+  Ne_Estimate      = round(ne_var_original, 0),
+  Bootstrap_Mean   = round(mean(bootstrap_results, na.rm = TRUE), 0),
+  Bootstrap_Median = round(median(bootstrap_results, na.rm = TRUE), 0),
+  CI_95_Lower      = round(ci_95[1], 0),
+  CI_95_Upper      = round(ci_95[2], 0),
+  CI_90_Lower      = round(ci_90[1], 0),
+  CI_90_Upper      = round(ci_90[2], 0),
+  Bootstrap_SD     = round(sd(bootstrap_results, na.rm = TRUE), 0),
+  Bootstrap_Reps   = 1000)
+
+write.csv(variance_results, "output/Ne_variance_results.csv",
+          row.names = FALSE)
+write.csv(data.frame(Replicate = seq_along(bootstrap_results),
+                     Ne_Estimate = bootstrap_results),
+          "output/Ne_variance_bootstrap_raw.csv", row.names = FALSE)
+
+kable(variance_results, caption = "Ne variance method summary statistics")
+```
+
+------------------------------------------------------------------------
+
+# Section 11: Data Conversion for NeEstimator (LD Method)
+
+This section converts LD-pruned PLINK data to GenePop format for
+NeEstimator v2. After this section completes, load the output file in
+NeEstimator manually using the settings in Section 0.9.
+
+```{r neestimator-conversion}
+runPLINK2("--bfile input/populations_pruned --export ped --out input/populations_neestimator")
+
+ped_data   <- fread("input/populations_neestimator.ped", header = FALSE)
+map_data   <- fread("input/populations_neestimator.map", header = FALSE)
+genotypes  <- ped_data[, 7:ncol(ped_data)]
+sample_ids <- ped_data$V2
+
+cat("PED file:", nrow(ped_data), "samples x", nrow(map_data), "SNPs\n")
+
+snp_names       <- paste0("SNP_", 1:nrow(map_data))
+genotype_matrix <- matrix(nrow = nrow(genotypes), ncol = ncol(genotypes))
+for (i in 1:ncol(genotypes)) {
+  gt <- genotypes[[i]]
+  gt[gt == 0] <- "0"
+  gt[gt == 1] <- "A"
+  gt[gt == 2] <- "T"
+  genotype_matrix[, i] <- gt
+}
+
+genepop_lines     <- c("RAD-seq bay pipefish Ne estimation",
+                       paste(snp_names, collapse = "\n"), "Pop")
+genepop_genotypes <- character(nrow(genotype_matrix))
+for (i in 1:nrow(genotype_matrix)) {
+  individual_gts <- character()
+  for (j in seq(1, ncol(genotype_matrix), by = 2)) {
+    if (j + 1 <= ncol(genotype_matrix)) {
+      a1 <- genotype_matrix[i, j]
+      a2 <- genotype_matrix[i, j + 1]
+      gt_pair <- if (a1 == "0" || a2 == "0") "0000" else
+        paste0(ifelse(a1 == "A", "01", "02"),
+               ifelse(a2 == "A", "01", "02"))
+      individual_gts <- c(individual_gts, gt_pair)
+    }
+  }
+  genepop_genotypes[i] <- paste(sample_ids[i], ",",
+                                 paste(individual_gts, collapse = " "))
+}
+
+writeLines(c(genepop_lines, genepop_genotypes),
+           "output/populations_neestimator.gen")
+
+cat("GenePop file saved to: output/populations_neestimator.gen\n")
+cat("Load this file in NeEstimator v2 — see Section 0.9 for settings.\n")
+```
+
+------------------------------------------------------------------------
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
+
+------------------------------------------------------------------------
+
+# Output Files Summary
+
+All output files are written to the `output/` directory:
+
+| File | Description | Manuscript location |
+|----|----|----|
+| `Figure_02_PCA.png/.pdf` | PCA of genetic variation | Figure 2 |
+| `Figure_04_FST_genome_wide.png` | Genome-wide FST | Figure 4 |
+| `Figure_05_LD_Heatmap.png/.pdf` | Genome-wide LD heatmaps | Figure 5 |
+| `Supp_Fig_02_Permutation_FST.png/.pdf` | Permutation test | Supp. Figure 2 |
+| `Supp_Fig_03_Bootstrap_FST.png/.pdf` | Bootstrap FST | Supp. Figure 3 |
+| `Supp_Fig_04_Kinship_Heatmap.png/.pdf` | Kinship heatmap | Supp. Figure 4 |
+| `Supp_Fig_05_LD_Decay.png/.pdf` | LD decay analysis | Supp. Figure 5 |
+| `Chr1_elevated_LD_windows.png/.pdf` | Chr 1 elevated LD | Results text |
+| `kinship_mom_results.csv` | MoM pairwise kinship | — |
+| `kinship_king.csv` | KING pairwise kinship | — |
+| `kinship_ibs.csv` | IBS pairwise kinship | — |
+| `kinship_mle.csv` | MLE pairwise kinship | — |
+| `Ne_variance_results.csv` | Ne variance method summary | Results text |
+| `Ne_variance_bootstrap_raw.csv` | Ne bootstrap replicates | — |
+| `populations_neestimator.gen` | GenePop file for NeEstimator | Methods |
+| `All_chromosome_window_LD.csv` | Sliding window LD all chromosomes | — |
+| `Chr1_window_LD.csv` | Sliding window LD Chr 1 | — |
